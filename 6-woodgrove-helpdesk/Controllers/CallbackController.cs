@@ -1,41 +1,45 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Logging;
+using Microsoft.Identity.Client;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Tasks;
+using System.Security.Cryptography.X509Certificates;
+using System.Net.Http.Headers;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Identity.Web;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
+using System.Security.Policy;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Extensions;
+using Azure.Core;
+using Microsoft.AspNetCore.Http;
 using WoodgroveHelpdesk.Models;
 
-namespace WoodgroveHelpdesk.Controllers
-{
+namespace WoodgroveHelpdesk.Controllers {
     [Route("api/[action]")]
     [ApiController]
     public class CallbackController : Controller
     {
-        private enum RequestType
-        {
+        private enum RequestType {
             Unknown,
             Presentation,
             Issuance,
             Selfie
         };
-
-        private readonly IMemoryCache _cache;
-        private readonly ILogger<CallbackController> _log;
-        private readonly string _apiKey;
-        private readonly IConfiguration _configuration;
-
+        protected IMemoryCache _cache;
+        protected readonly ILogger<CallbackController> _log;
+        private string _apiKey;
+        private IConfiguration _configuration;
         public CallbackController(IConfiguration configuration, IMemoryCache memoryCache, ILogger<CallbackController> log)
         {
             _configuration = configuration;
@@ -44,20 +48,16 @@ namespace WoodgroveHelpdesk.Controllers
             _apiKey = System.Environment.GetEnvironmentVariable("API-KEY");
         }
 
-        private async Task<ActionResult> HandleRequestCallback(RequestType requestType, string body)
-        {
-            try
-            {
-                this.Request.Headers.TryGetValue("api-key", out var apiKey);
-                if (requestType != RequestType.Selfie && this._apiKey != apiKey)
-                {
-                    _log.LogTrace("api-key wrong or missing");
+        private async Task<ActionResult> HandleRequestCallback( RequestType requestType, string body ) {
+            try {
+                this.Request.Headers.TryGetValue( "api-key", out var apiKey );
+                if (requestType != RequestType.Selfie && this._apiKey != apiKey) {
+                    _log.LogTrace( "api-key wrong or missing" );
                     return new ContentResult() { StatusCode = (int)HttpStatusCode.Unauthorized, Content = "api-key wrong or missing" };
                 }
-                if (body == null)
-                {
-                    body = await new System.IO.StreamReader(this.Request.Body).ReadToEndAsync();
-                    _log.LogTrace(body);
+                if ( body == null) {
+                    body = await new System.IO.StreamReader( this.Request.Body ).ReadToEndAsync();
+                    _log.LogTrace( body );
                 }
 
                 bool rc = false;
@@ -66,193 +66,136 @@ namespace WoodgroveHelpdesk.Controllers
                 List<string> issuanceStatus = new List<string>() { "request_retrieved", "issuance_successful", "issuance_error" };
                 List<string> selfieStatus = new List<string>() { "selfie_taken" };
 
-                CallbackEvent callback = JsonConvert.DeserializeObject<CallbackEvent>(body);
+                CallbackEvent callback = JsonConvert.DeserializeObject<CallbackEvent>( body );
 
-                if ((requestType == RequestType.Presentation && presentationStatus.Contains(callback.requestStatus))
-                    || (requestType == RequestType.Issuance && issuanceStatus.Contains(callback.requestStatus))
-                    || (requestType == RequestType.Selfie && selfieStatus.Contains(callback.requestStatus)))
-                {
-                    if (!_cache.TryGetValue(callback.state, out string requestState))
-                    {
+                if (   (requestType == RequestType.Presentation && presentationStatus.Contains( callback.requestStatus ))
+                    || (requestType == RequestType.Issuance && issuanceStatus.Contains( callback.requestStatus ))
+                    || (requestType == RequestType.Selfie && selfieStatus.Contains( callback.requestStatus ))) {
+                    if (!_cache.TryGetValue( callback.state, out string requestState )) {
                         errorMessage = $"Invalid state '{callback.state}'";
-                    }
-                    else
-                    {
-                        JObject reqState = JObject.Parse(requestState);
+                    } else {
+                        JObject reqState = JObject.Parse( requestState );
                         reqState["status"] = callback.requestStatus;
-                        if (reqState.ContainsKey("callback"))
-                        {
+                        if (reqState.ContainsKey( "callback" )) {
                             reqState["callback"] = body;
+                        } else {
+                            reqState.Add( "callback", body );
                         }
-                        else
-                        {
-                            reqState.Add("callback", body);
-                        }
-                        _cache.Set(callback.state, JsonConvert.SerializeObject(reqState),
-                            DateTimeOffset.Now.AddSeconds(_configuration.GetValue<int>("AppSettings:CacheExpiresInSeconds", 300)));
+                        _cache.Set( callback.state, JsonConvert.SerializeObject( reqState )
+                            , DateTimeOffset.Now.AddSeconds( _configuration.GetValue<int>( "AppSettings:CacheExpiresInSeconds", 300 ) ) );
                         rc = true;
                     }
-                }
-                else
-                {
+                } else {
                     errorMessage = $"Unknown request status '{callback.requestStatus}'";
                 }
-                if (!rc)
-                {
-                    return BadRequest(new { error = "400", error_description = errorMessage });
+                if (!rc ) {
+                    return BadRequest( new { error = "400", error_description = errorMessage } );
                 }
                 return new OkResult();
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(new { error = "400", error_description = ex.Message });
+            } catch (Exception ex) {
+                return BadRequest( new { error = "400", error_description = ex.Message } );
             }
         }
 
         [AllowAnonymous]
-        [HttpPost("/api/issuer/issuecallback")]
-        public async Task<ActionResult> IssuanceCallback()
-        {
-            _log.LogTrace(this.Request.GetDisplayUrl());
-            return await HandleRequestCallback(RequestType.Issuance, null);
+        [HttpPost( "/api/issuer/issuecallback" )]
+        public async Task<ActionResult> IssuanceCallback() {
+            _log.LogTrace( this.Request.GetDisplayUrl() );
+            return await HandleRequestCallback( RequestType.Issuance, null );
         }
 
         [AllowAnonymous]
-        [HttpPost("/api/verifier/presentationcallback")]
-        public async Task<ActionResult> PresentationCallback()
-        {
-            _log.LogTrace(this.Request.GetDisplayUrl());
-            var result = await HandleRequestCallback(RequestType.Presentation, null);
-
-            // Check if presentation was successfully verified
-            if (result is OkResult)
-            {
-                // Presentation was verified, generate Temporary Access Pass (TAP)
-                var tap = GenerateTemporaryAccessPass();
-
-                // Optionally, you can send the TAP back to the user or store it for future use
-                // For example, you can return it as part of the response
-                return Ok(new { tap });
-            }
-
-            // Handle other cases if needed
-            return result;
-        }
-
-        // Method to generate Temporary Access Pass (TAP)
-        private string GenerateTemporaryAccessPass()
-        {
-            // Generate TAP logic here
-            // This can involve creating a token, including relevant information, and encrypting it if necessary
-            // For demonstration purposes, let's assume a simple token generation
-
-            var tap = Guid.NewGuid().ToString(); // Example: Generate a random GUID as TAP
-
-            return tap;
+        [HttpPost( "/api/verifier/presentationcallback" )]
+        public async Task<ActionResult> PresentationCallback() {
+            _log.LogTrace( this.Request.GetDisplayUrl() );
+            return await HandleRequestCallback( RequestType.Presentation, null );
         }
 
         [AllowAnonymous]
-        [HttpGet("/api/request-status")]
-        public ActionResult RequestStatus()
-        {
-            _log.LogTrace(this.Request.GetDisplayUrl());
-            try
-            {
-                if (!PollRequestStatus(out JObject response))
-                {
-                    return BadRequest(new { error = "400", error_description = JsonConvert.SerializeObject(response) });
+        [HttpGet( "/api/request-status" )]
+        public ActionResult RequestStatus() {
+            _log.LogTrace( this.Request.GetDisplayUrl() );
+            try {
+                if (! PollRequestStatus( out JObject response )) {
+                    return BadRequest( new { error = "400", error_description = JsonConvert.SerializeObject( response ) } );
                 }
-                return new ContentResult { ContentType = "application/json", Content = JsonConvert.SerializeObject(response) };
-            }
-            catch (Exception ex)
-            {
-                return BadRequest(new { error = "400", error_description = ex.Message });
+                return new ContentResult { ContentType = "application/json", Content = JsonConvert.SerializeObject( response ) };
+            } catch (Exception ex) {
+                return BadRequest( new { error = "400", error_description = ex.Message } );
             }
         }
-
-        public bool PollRequestStatus(out JObject result)
-        {
+        public bool PollRequestStatus( out JObject result ) {
             result = null;
             string state = this.Request.Query["id"];
-            if (string.IsNullOrEmpty(state))
-            {
-                result = JObject.FromObject(new { status = "error", message = "Missing argument 'id'" });
+            if (string.IsNullOrEmpty( state )) {
+                result = JObject.FromObject( new { status = "error", message = "Missing argument 'id'" } );
                 return false;
             }
             bool rc = true;
-            if (_cache.TryGetValue(state, out string requestState))
-            {
+            if (_cache.TryGetValue( state, out string requestState )) {
                 JObject reqState = JObject.Parse(requestState);
                 string requestStatus = reqState["status"].ToString();
                 CallbackEvent callback = null;
-                switch (requestStatus)
-                {
+                switch ( requestStatus ) {
                     case "request_created":
-                        result = JObject.FromObject(new { status = requestStatus, message = "Waiting to scan QR code" });
+                        result = JObject.FromObject( new { status = requestStatus, message = "Waiting to scan QR code" } );
                         break;
                     case "request_retrieved":
-                        result = JObject.FromObject(new { status = requestStatus, message = "QR code is scanned. Waiting for user action..." });
+                        result = JObject.FromObject( new { status = requestStatus, message = "QR code is scanned. Waiting for user action..." } );
                         break;
                     case "issuance_error":
-                        callback = JsonConvert.DeserializeObject<CallbackEvent>(reqState["callback"].ToString());
-                        result = JObject.FromObject(new { status = requestStatus, message = "Issuance failed: " + callback.error.message });
+                        callback = JsonConvert.DeserializeObject<CallbackEvent>( reqState["callback"].ToString() );
+                        result = JObject.FromObject( new { status = requestStatus, message = "Issuance failed: " + callback.error.message } );
                         break;
                     case "issuance_successful":
-                        result = JObject.FromObject(new { status = requestStatus, message = "Issuance successful" });
+                        result = JObject.FromObject( new { status = requestStatus, message = "Issuance successful" } );
                         break;
                     case "presentation_error":
-                        callback = JsonConvert.DeserializeObject<CallbackEvent>(reqState["callback"].ToString());
-                        result = JObject.FromObject(new { status = requestStatus, message = "Presentation failed:" + callback.error.message });
+                        callback = JsonConvert.DeserializeObject<CallbackEvent>( reqState["callback"].ToString() );                        
+                        result = JObject.FromObject( new { status = requestStatus, message = "Presentation failed:" + callback.error.message } );
                         break;
                     case "presentation_verified":
-                        callback = JsonConvert.DeserializeObject<CallbackEvent>(reqState["callback"].ToString());
-                        JObject resp = JObject.Parse(JsonConvert.SerializeObject(new
-                        {
-                            status = requestStatus,
-                            message = "Presentation verified",
-                            type = callback.verifiedCredentialsData[0].type,
-                            claims = callback.verifiedCredentialsData[0].claims,
-                            subject = callback.subject,
-                            payload = callback.verifiedCredentialsData,
-                        }, Newtonsoft.Json.Formatting.None, new JsonSerializerSettings
-                        {
-                            NullValueHandling = NullValueHandling.Ignore
-                        }));
-                        if (null != callback.receipt && null != callback.receipt.vp_token)
-                        {
-                            JObject vpToken = GetJsonFromJwtToken(callback.receipt.vp_token[0]);
-                            JObject vc = GetJsonFromJwtToken(vpToken["vp"]["verifiableCredential"][0].ToString());
-                            resp.Add(new JProperty("jti", vc["jti"].ToString()));
+                        callback = JsonConvert.DeserializeObject<CallbackEvent>(reqState["callback"].ToString() );
+                        JObject resp = JObject.Parse( JsonConvert.SerializeObject( new {
+                                                                                    status = requestStatus,
+                                                                                    message = "Presentation verified",
+                                                                                    type = callback.verifiedCredentialsData[0].type,
+                                                                                    claims = callback.verifiedCredentialsData[0].claims,
+                                                                                    subject = callback.subject,
+                                                                                    payload = callback.verifiedCredentialsData,
+                                                                                }, Newtonsoft.Json.Formatting.None, new JsonSerializerSettings {
+                                                                                                                NullValueHandling = NullValueHandling.Ignore
+                                                                            } ) );
+                        if (null != callback.receipt && null != callback.receipt.vp_token ) {
+                            JObject vpToken = GetJsonFromJwtToken( callback.receipt.vp_token[0] );
+                            JObject vc = GetJsonFromJwtToken( vpToken["vp"]["verifiableCredential"][0].ToString() );
+                            resp.Add( new JProperty( "jti", vc["jti"].ToString() ) );
                         }
-                        if (!string.IsNullOrWhiteSpace(callback.verifiedCredentialsData[0].expirationDate))
-                        {
-                            resp.Add(new JProperty("expirationDate", callback.verifiedCredentialsData[0].expirationDate));
+                        if (!string.IsNullOrWhiteSpace( callback.verifiedCredentialsData[0].expirationDate )) {
+                            resp.Add( new JProperty( "expirationDate", callback.verifiedCredentialsData[0].expirationDate ) );
                         }
-                        if (!string.IsNullOrWhiteSpace(callback.verifiedCredentialsData[0].issuanceDate))
-                        {
-                            resp.Add(new JProperty("issuanceDate ", callback.verifiedCredentialsData[0].issuanceDate));
+                        if (!string.IsNullOrWhiteSpace( callback.verifiedCredentialsData[0].issuanceDate )) {
+                            resp.Add( new JProperty( "issuanceDate ", callback.verifiedCredentialsData[0].issuanceDate ) );
                         }
                         result = resp;
                         break;
                     default:
-                        result = JObject.FromObject(new { status = "error", message = $"Invalid requestStatus '{requestStatus}'" });
+                        result = JObject.FromObject( new { status = "error", message = $"Invalid requestStatus '{requestStatus}'" } );
                         rc = false;
                         break;
                 }
-            }
-            else
-            {
-                result = JObject.FromObject(new { status = "request_not_created", message = "No data" });
+            } else {
+                result = JObject.FromObject( new { status = "request_not_created", message = "No data" } );
                 rc = false;
             }
             return rc;
         }
 
         public JObject GetJsonFromJwtToken(string jwtToken)
-        {
+        {            
             jwtToken = jwtToken.Replace("_", "/").Replace("-", "+").Split(".")[1];
             jwtToken = jwtToken.PadRight(4 * ((jwtToken.Length + 3) / 4), '=');
-            return JObject.Parse(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(jwtToken)));
+            return JObject.Parse(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(jwtToken)) );
         }
+
     } // cls
-} // ns
