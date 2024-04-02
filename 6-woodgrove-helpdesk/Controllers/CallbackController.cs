@@ -178,12 +178,6 @@ namespace WoodgroveHelpdesk.Controllers {
                             resp.Add( new JProperty( "issuanceDate ", callback.verifiedCredentialsData[0].issuanceDate ) );
                         }
                         result = resp;
-
-                        // Generate Temporary Access Pass (TAP) and update cached data
-                        if (callback.requestStatus == "presentation_verified")
-                        {
-                            return await CreateTap(reqState);
-                        }
                         break;
                     default:
                         result = JObject.FromObject( new { status = "error", message = $"Invalid requestStatus '{requestStatus}'" } );
@@ -197,87 +191,6 @@ namespace WoodgroveHelpdesk.Controllers {
             return rc;
         }
 
-        public async Task<ActionResult> CreateTap(JObject reqState)
-        {
-            try
-            {
-                // Extract user's first and last name from the verified credentials
-                string firstName = null;
-                string lastName = null;
-                CallbackEvent callback = JsonConvert.DeserializeObject<CallbackEvent>(reqState["callback"].ToString());
-                foreach (var vc in callback.verifiedCredentialsData)
-                {
-                    if (vc.type.Contains(_configuration["VerifiedID:CredentialType"]))
-                    {
-                        if (vc.claims.ContainsKey("firstName") && vc.claims.ContainsKey("lastName"))
-                        {
-                            firstName = vc.claims["firstName"].ToString();
-                            lastName = vc.claims["lastName"].ToString();
-                        }
-                    }
-                }
-
-                if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
-                {
-                    return BadRequest(new { error = "400", error_description = $"firstName/lastName missing in presented credential" });
-                }
-
-                // Retrieve user information from Microsoft Graph using first and last name
-                var mgClient = GetGraphClient();
-                var users = await mgClient.Users.Request().Filter($"givenName eq '{firstName}' and surname eq '{lastName}'").GetAsync();
-
-                if (users == null || (users != null && users.Count == 0))
-                {
-                    return BadRequest(new { error = "400", error_description = $"No user found with givenName '{firstName}' and surname '{lastName}'" });
-                }
-
-                if (users != null && users.Count > 1)
-                {
-                    return BadRequest(new { error = "400", error_description = $"Multiple users found with givenName '{firstName}' and surname '{lastName}'" });
-                }
-
-                var userObjectId = users[0].Id;
-
-                // Delete any existing TAPs for the user
-                var existingTap = await mgClient.Users[userObjectId].Authentication.TemporaryAccessPassMethods.Request().GetAsync();
-                foreach (var eTap in existingTap)
-                {
-                    await mgClient.Users[userObjectId].Authentication.TemporaryAccessPassMethods[eTap.Id].Request().DeleteAsync();
-                }
-
-                // Generate a new Temporary Access Pass (TAP) code
-                TemporaryAccessPassAuthenticationMethod tap = new TemporaryAccessPassAuthenticationMethod();
-                tap.LifetimeInMinutes = _configuration.GetValue<int>("AppSettings:tapLifetimeInMinutes", 60);
-                var tapResult = await mgClient.Users[userObjectId].Authentication.TemporaryAccessPassMethods.Request().AddAsync(tap);
-                tap = tapResult;
-
-                // Prepare response data
-                var responseData = new
-                {
-                    status = "tap_created",
-                    message = $"Welcome aboard!",
-                    userFirstName = firstName,
-                    userLastName = lastName,
-                    userObjectId = userObjectId,
-                    tap = tap.TemporaryAccessPass,
-                    expiresUtc = DateTime.UtcNow.AddMinutes(tap.LifetimeInMinutes),
-                    payload = $"objectId={userObjectId}, tap={tap.TemporaryAccessPass}"
-                };
-
-                _log.LogTrace($"{responseData.message}. objectId={userObjectId}");
-
-                // Update the cached data
-                _cache.Set(reqState["state"].ToString(), JsonConvert.SerializeObject(responseData));
-
-                return Created(string.Empty, responseData);
-            }
-            catch (Exception ex)
-            {
-                _log.LogTrace(ex.Message);
-                return BadRequest(new { error = "400", error_description = ex.Message });
-            }
-        }
-
         public JObject GetJsonFromJwtToken(string jwtToken)
         {            
             jwtToken = jwtToken.Replace("_", "/").Replace("-", "+").Split(".")[1];
@@ -286,4 +199,3 @@ namespace WoodgroveHelpdesk.Controllers {
         }
 
     } // cls
-} // ns
